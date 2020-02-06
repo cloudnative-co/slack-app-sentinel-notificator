@@ -1,0 +1,21 @@
+{
+    "Records": [
+        {
+            "messageId": "db545ff4-0530-4ee6-b79f-76b024c4b51b",
+            "receiptHandle": "AQEBLa5NDYS4bvhBAOdpw3kcVmxih3768exVhMEjgrsH/CtQllZWxZFnVmAXUPFSn7bf3MO9m9IUsW1Vrb5sr2YKNnBWBTDsEE+biBCHP6xwGSFfVw7YOQ3lkxq6LMuuwzOJ6PIz7gEmA9mAb4hSmjlsMoeFAaWQY/Pg0XR4FQyQQzOJoW2OTyyCw1Y2qgqIhrq6DAyG5td7cWocN5Htf7je86zCeJbhEs8KSMsvqSDjMCQJEYknE6VGCOwIJVPN0CIXQNBj0amJYBo8sQd4ihR9PNAtVcScdzive/z9tLoF+c7WwOblEzzHsyxluPb1uaqwcmznS1Fk++a9KNlczTq7rRXgN1rOMCmTIzeMnbCaHxFlz0IlWihO43PvQndj6P82t7njNkn8c7jVE+KscDURbToYVjUJ0KtD+l07tt8qpFo=",
+            "body": "{\"AlertName\":\"IAM Policy changes (AWS)\",\"Description\":\"Activity policy 'IAM Policy changes (AWS)' was triggered by 'assumed-role/sso/seba@cloudnative.co.jp'\",\"Name\":\"assumed-role/sso/seba\",\"SystemAlertId\":\"21e68db1-10b2-a578-f5e3-075b3c2f2234\",\"UPNSuffix\":\"cloudnative.co.jp\"}",
+            "attributes": {
+                "ApproximateReceiveCount": "1",
+                "AWSTraceHeader": "Root=1-5e1ed1df-cadd5c5d195107c2a684d0c3",
+                "SentTimestamp": "1579078111316",
+                "SenderId": "AROA5PYZCIC2XZG67LPJE:BackplaneAssumeRoleSession",
+                "ApproximateFirstReceiveTimestamp": "1579078111323"
+            },
+            "messageAttributes": {},
+            "md5OfBody": "c435a8c4b414b14faf0219173161c5b0",
+            "eventSource": "aws:sqs",
+            "eventSourceARN": "arn:aws:sqs:ap-northeast-1:927228641461:sentinel-alert-receiver",
+            "awsRegion": "ap-northeast-1"
+        }
+    ]
+}

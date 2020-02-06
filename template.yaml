@@ -1,0 +1,337 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+    ProjectName:
+        Type: String
+        Default: SentinelNotificator
+    RolePath:
+        Description: "Path of IAM Role for Lambda"
+        Type: String
+        Default: /Lambda/Slack/SentinelNotificator/
+    # --------------------------------------------------------------------------
+    # Slack
+    # --------------------------------------------------------------------------
+    # Slackコマンド用トークン
+    SlackSigningSecret:
+        Description: "Verification token of slack command"
+        NoEcho: true
+        Type: String
+    SlackApiToken:
+        Description: "Secret token of Slack API"
+        NoEcho: true
+        Type: String
+    SlackChannelId:
+        Description: "Slack Channel Id for Notification"
+        Type: String
+    LogicAppUrl:
+        Description: "Logic Apps Response Url for Azure Sentinel"
+        Type: String
+Resources:
+    SentinelNotificatorRole:
+        Description: "[Create] IAM Role for Lambda functions"
+        Type: 'AWS::IAM::Role'
+        Properties:
+            Description: Role for the Lambda functions of Sentinel Notificater
+            RoleName: !Join ["-", [!Ref ProjectName, "Role"]]
+            Path: !Ref RolePath
+            AssumeRolePolicyDocument:
+                Statement:
+                  - Action: 'sts:AssumeRole'
+                    Effect: Allow
+                    Principal:
+                        Service: lambda.amazonaws.com
+                  - Action: 'sts:AssumeRole'
+                    Effect: Allow
+                    Principal:
+                        Service: apigateway.amazonaws.com
+            Policies:
+              - PolicyName: !Join ["-", [!Ref ProjectName, "Policy"]]
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                      - Effect: Allow
+                        Action:
+                          - "logs:CreateLogGroup"
+                          - "logs:CreateLogStream"
+                          - "logs:PutLogEvents"
+                          - "lambda:InvokeFunction"
+                          - "kms:Decrypt"
+                          - "sqs:GetQueueUrl"
+                          - "sqs:SendMessage"
+                          - "sqs:CreateQueue"
+                          - "sqs:DeleteMessage"
+                        Resource: '*'
+    # Lambda用のKMSキーの作成
+    KmsKey:
+        Description: "[Create] KMS Key for Lambda functions"
+        Type: 'AWS::KMS::Key'
+        Properties:
+            Description: Encrypt/Decrypt enviroment parameter for the Lambda functions of Sentinel Notificater
+            Enabled: true
+            KeyPolicy:
+                Id: key-default-1
+                Version: 2012-10-17
+                Statement:
+                  - Sid: Enable IAM Permission
+                    Effect: Allow
+                    Action: kms:*
+                    Resource: "*"
+                    Principal:
+                        AWS: !Join [ "", [ "arn:aws:iam::", !Ref "AWS::AccountId", ":root" ] ]
+                  - Sid: Allow use of the key from Lambda
+                    Effect: Allow
+                    Principal:
+                        AWS: !GetAtt SentinelNotificatorRole.Arn
+                    Action:
+                      - kms:Decrypt
+                      - kms:Encrypt
+                    Resource: "*"
+        DependsOn: SentinelNotificatorRole
+    KmsKeyAlias:
+        Type: 'AWS::KMS::Alias'
+        Properties:
+            AliasName: !Join ["/", ["alias", "lambda", !Ref ProjectName]]
+            TargetKeyId: !Ref KmsKey
+        DependsOn: KmsKey
+    EncrypterFunctionExecutionRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            AssumeRolePolicyDocument:
+                Statement:
+                  - Action: 'sts:AssumeRole'
+                    Effect: Allow
+                    Principal:
+                        Service: lambda.amazonaws.com
+            Policies:
+              - PolicyDocument:
+                    Statement:
+                      - Action:
+                          - kms:Encrypt
+                          - logs:CreateLogGroup
+                          - logs:CreateLogStream
+                          - logs:PutLogEvents
+                        Effect: Allow
+                        Resource: '*'
+                PolicyName: !Sub "${AWS::StackName}-Encrypter-Policy"
+            Path: !Ref RolePath
+        DependsOn: KmsKey
+    EncrypterFunction:
+        Type: AWS::Serverless::Function
+        Properties:
+            CodeUri: encrypter/
+            Handler: app.lambda_handler
+            FunctionName: "SentinelNotificationEncrypter"
+            MemorySize: 128
+            Role: !GetAtt EncrypterFunctionExecutionRole.Arn
+            Runtime: python3.6
+            Timeout: 120
+        DependsOn: EncrypterFunctionExecutionRole
+    # --------------------------------------------------------------------------
+    # SQS
+    # --------------------------------------------------------------------------
+    ReceiverQueue:
+        Type: "AWS::SQS::Queue"
+        Properties:
+            QueueName: SentinelNotificationReceiver
+            DelaySeconds: 0
+            ReceiveMessageWaitTimeSeconds: 0
+            VisibilityTimeout: 30
+    ReceiverQueuePolicy:
+        Type: "AWS::SQS::QueuePolicy"
+        Properties:
+            PolicyDocument:
+                Id: !Ref ReceiverQueue
+                Statement:
+                  - Sid: QueuePolicy-ReceiverQueue
+                    Effect: Allow
+                    Principal: "*"
+                    Action: "SQS:*"
+                    Resource:
+                        Fn::GetAtt:
+                          - ReceiverQueue
+                          - Arn
+            Queues:
+              - !Ref ReceiverQueue
+        DependsOn: ReceiverQueue
+    IgnoreQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+            QueueName: SentinelNotificationIgnore
+            DelaySeconds: 0
+            ReceiveMessageWaitTimeSeconds: 0
+            VisibilityTimeout: 30
+    # --------------------------------------------------------------------------
+    # 環境変数の暗号化
+    # --------------------------------------------------------------------------
+    SlackApiTokenEnc:
+        Description: "[Encryption] Slack api token"
+        Type: Custom::Encrypter
+        Properties:
+            ServiceToken: !GetAtt EncrypterFunction.Arn
+            KeyId: !Ref KmsKey
+            Plaintext: !Ref SlackApiToken
+            region: !Sub "${AWS::Region}"
+        DependsOn: EncrypterFunction
+    SlackSigningSecretEnc:
+        Description: "[Encryption] Slack Signing Secret"
+        Type: Custom::Encrypter
+        Properties:
+            ServiceToken: !GetAtt EncrypterFunction.Arn
+            KeyId: !Ref KmsKey
+            Plaintext: !Ref SlackSigningSecret
+            region: !Sub "${AWS::Region}"
+        DependsOn: EncrypterFunction
+    # --------------------------------------------------------------------------
+    # Lambda Function
+    # --------------------------------------------------------------------------
+    ReceiverFunction:
+        Description: "[Create] Lambda function for SQS Receiver"
+        Type: AWS::Serverless::Function
+        Properties:
+            Description: "Lambda function for SQS Receiver from Sentinel notification"
+            CodeUri: receiver/
+            Handler: app.lambda_handler
+            Runtime: python3.6
+            FunctionName: "SentinelNotificationReceiver"
+            KmsKeyArn: !GetAtt KmsKey.Arn
+            Role: !GetAtt SentinelNotificatorRole.Arn
+            Events:
+                SQSEvent:
+                    Type: SQS
+                    Properties:
+                        Queue: !GetAtt ReceiverQueue.Arn
+                        BatchSize: 10
+            Environment:
+                Variables:
+                    IGNORE_QUEUE: !GetAtt IgnoreQueue.QueueName
+                    REGION: !Sub "${AWS::Region}"
+                    SLACK_API_TOKEN: !GetAtt SlackApiTokenEnc.Value
+                    SLACK_CHANNEL_ID: !Ref SlackChannelId
+    RespondentFunction:
+        Description: "[Create] Lambda function to receive an answer from Slack"
+        Type: AWS::Serverless::Function
+        Properties:
+            Description: "Lambda function to receive an answer from Slack"
+            CodeUri: respondent/
+            Handler: app.lambda_handler
+            Runtime: python3.6
+            FunctionName: "SentinelNotificationRespondent"
+            KmsKeyArn: !GetAtt KmsKey.Arn
+            Role: !GetAtt SentinelNotificatorRole.Arn
+            Events:
+                SentinelNotificator:
+                    Type: Api
+                    Properties:
+                        RestApiId: !Ref APIGateway
+                        Path: /respondent
+                        Method: post
+            Environment:
+                Variables:
+                    IGNORE_QUEUE: !GetAtt IgnoreQueue.QueueName
+                    REGION: !Sub "${AWS::Region}"
+                    SLACK_API_TOKEN: !GetAtt SlackApiTokenEnc.Value
+                    SLACK_SIGNING_SECRET: !GetAtt SlackSigningSecretEnc.Value
+                    SLACK_CHANNEL_ID: !Ref SlackChannelId
+                    LOGIC_APP_URL: !Ref LogicAppUrl
+    CrawlerFunction:
+        Description: "[Create] Lambda function for crawle to confirm the ignore queue"
+        Type: AWS::Serverless::Function
+        Properties:
+            Description: "Lambda function for crawle to confirm the ignore queue"
+            CodeUri: crawler/
+            Handler: app.lambda_handler
+            Runtime: python3.6
+            FunctionName: "SentinelNotificationCrawler"
+            KmsKeyArn: !GetAtt KmsKey.Arn
+            Role: !GetAtt SentinelNotificatorRole.Arn
+            Events:
+                SentinelNotificator:
+                    Type: Schedule
+                    Properties:
+                        Schedule: rate(72 hours)
+            Environment:
+                Variables:
+                    IGNORE_QUEUE: !GetAtt IgnoreQueue.QueueName
+                    REGION: !Sub "${AWS::Region}"
+                    SLACK_API_TOKEN: !GetAtt SlackApiTokenEnc.Value
+                    SLACK_CHANNEL_ID: !Ref SlackChannelId
+    # --------------------------------------------------------------------------
+    # CloudWatchLogs
+    # --------------------------------------------------------------------------
+    ReceiverFunctionLogGroup:
+        Type: AWS::Logs::LogGroup
+        Properties:
+            LogGroupName: /aws/lambda/SentinelNotificationReceiver
+            RetentionInDays: 3
+    RespondentFunctionLogGroup:
+        Type: AWS::Logs::LogGroup
+        Properties:
+            LogGroupName: /aws/lambda/SentinelNotificationRespondent
+            RetentionInDays: 3
+    CrawlerFunctionLogGroup:
+        Type: AWS::Logs::LogGroup
+        Properties:
+            LogGroupName: /aws/lambda/SentinelNotificationCrawler
+            RetentionInDays: 3
+    # --------------------------------------------------------------------------
+    # APIGateay
+    # --------------------------------------------------------------------------
+    APIGateway:
+        Type: AWS::Serverless::Api
+        Properties:
+            Name: !Ref ProjectName
+            StageName: api
+            DefinitionBody:
+                swagger: "2.0"
+                schemes:
+                  - "https"
+                paths:
+                    /receive:
+                        post:
+                            consumes:
+                              - "application/json"
+                            produces:
+                              - "application/json"
+                            parameters:
+                              - name: "Content-Type"
+                                in: "header"
+                                required: false
+                                type: "string"
+                            responses:
+                                "200":
+                                    description: "200 response"
+                                    schema:
+                                        $ref: "#/definitions/Empty"
+                            x-amazon-apigateway-integration:
+                                credentials: !GetAtt SentinelNotificatorRole.Arn
+                                uri: !Sub "arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/SentinelNotificationReceiver"
+                                responses:
+                                    default:
+                                        statusCode: "200"
+                                requestParameters:
+                                    integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+                                passthroughBehavior: "never"
+                                httpMethod: "POST"
+                                requestTemplates:
+                                    application/json: "Action=SendMessage&MessageBody=$util.urlEncode($input.body)"
+                                type: "aws"
+                    /respondent:
+                        post:
+                            responses: {}
+                            x-amazon-apigateway-integration:
+                                uri: !Join
+                                  - '/'
+                                  -   - !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions"
+                                      - !GetAtt RespondentFunction.Arn
+                                      - 'invocations'
+                                passthroughBehavior: "when_no_match"
+                                httpMethod: "POST"
+                                type: "aws_proxy"
+                definitions:
+                    Empty:
+                        type: "object"
+                        title: "Empty Schema"
+Outputs:
+    Url:
+        Value: !Sub "https://${APIGateway}.execute-api.${AWS::Region}.amazonaws.com/api"
+        Description: "API Url"
